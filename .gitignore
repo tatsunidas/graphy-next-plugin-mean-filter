@@ -1,0 +1,4 @@
+dist/
+pkg/
+*.key
+minisign.key

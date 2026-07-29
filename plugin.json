@@ -1,0 +1,16 @@
+{
+  "id": "mean-filter",
+  "name": "Mean Filter（平均化フィルタ）",
+  "version": "0.1.0",
+  "contributes": ["viewer2d.menu"],
+  "ui": "ui.js",
+  "engines": {
+    "graphy": ">=0.1.8",
+    "os": ["win32", "darwin", "linux"]
+  },
+  "permissions": ["read-pixels"],
+  "description": "2D ビューアで開いているシリーズの表示画像に k×k の平均化フィルタをかけ、before/after を並べて表示します。",
+  "author": "Visionary Imaging Services, Inc.",
+  "homepage": "https://github.com/tatsunidas/graphy-next-plugin-mean-filter",
+  "license": "MIT"
+}

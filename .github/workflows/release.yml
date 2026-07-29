@@ -1,0 +1,79 @@
+# GRAPHY-Next プラグインのリリース。
+#
+# タグ v<version> を push すると、<id>-<version>.zip と .sha256 を作って GitHub Release に添付する。
+# secrets に MINISIGN_SECRET_KEY / MINISIGN_PASSWORD があれば署名（.minisig）と公開鍵も添付する。
+#
+# GRAPHY-Next のプラグインマネージャは、この「直下に plugin.json を置いたビルド済み zip 資産」を
+# 取得・検証・展開する（ソース tarball ではない）。
+name: Release plugin
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    # ステップ内 env は同じステップの if から参照できないため、ジョブレベルで公開する。
+    env:
+      MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
+      MINISIGN_PASSWORD: ${{ secrets.MINISIGN_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # plugin.json の version とタグを突き合わせる。ずれたまま配ると、
+      # 利用者側の一覧表示と実際の中身が食い違うので、ここで落とす。
+      - name: Resolve id / version
+        id: meta
+        run: |
+          id=$(jq -r .id plugin.json)
+          pjver=$(jq -r .version plugin.json)
+          ver="${GITHUB_REF_NAME#v}"
+          if [ "$pjver" != "$ver" ]; then
+            echo "::error::plugin.json version ($pjver) != tag ($ver). 版とタグを一致させてください。"
+            exit 1
+          fi
+          echo "id=$id"   >> "$GITHUB_OUTPUT"
+          echo "ver=$ver" >> "$GITHUB_OUTPUT"
+
+      - name: Package zip (+ sha256)
+        run: |
+          name="${{ steps.meta.outputs.id }}-${{ steps.meta.outputs.ver }}"
+          mkdir -p pkg dist
+          # 配布物に入れるのは実行に必要なファイルだけ。README や .d.ts は入れない。
+          cp plugin.json ui.js pkg/
+          (cd pkg && zip -r "../dist/$name.zip" .)     # 直下に plugin.json（マネージャの前提）
+          (cd dist && sha256sum "$name.zip" > "$name.zip.sha256")
+          ls -la dist
+
+      # 署名（任意だが強く推奨）。secrets が未登録ならこのステップは自動でスキップされる。
+      # 署名があると、利用者は 2 回目以降の更新を確認画面なしで導入できる（TOFU）。
+      - name: Sign package (optional)
+        if: ${{ env.MINISIGN_SECRET_KEY != '' }}
+        run: |
+          if [ ! -f minisign.pub ]; then
+            echo "::error::minisign.pub がリポジトリにありません（minisign -G で作り、公開鍵だけコミットしてください）"
+            exit 1
+          fi
+          sudo apt-get update -qq && sudo apt-get install -y -qq minisign
+          name="${{ steps.meta.outputs.id }}-${{ steps.meta.outputs.ver }}"
+          printf '%s' "$MINISIGN_SECRET_KEY" > /tmp/minisign.key
+          printf '%s\n' "$MINISIGN_PASSWORD" | minisign -S -s /tmp/minisign.key \
+            -m "dist/$name.zip" -t "$name" -x "dist/$name.zip.minisig"
+          rm -f /tmp/minisign.key
+          cp minisign.pub dist/
+          # 自分の公開鍵で検証できることを確認してから公開する。
+          minisign -V -p minisign.pub -m "dist/$name.zip" -x "dist/$name.zip.minisig"
+          ls -la dist
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/${{ steps.meta.outputs.id }}-${{ steps.meta.outputs.ver }}.zip
+            dist/${{ steps.meta.outputs.id }}-${{ steps.meta.outputs.ver }}.zip.sha256
+            dist/${{ steps.meta.outputs.id }}-${{ steps.meta.outputs.ver }}.zip.minisig
+            dist/minisign.pub
