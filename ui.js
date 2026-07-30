@@ -3,25 +3,22 @@
 /*
  * GRAPHY-Next プラグイン「Mean Filter」のフロント面。
  *
- * 2D ビューアで開いているシリーズの表示画像に k×k の平均化（ボックス）フィルタをかけ、
- * before / after を並べて表示する。
+ * 2D ビューアで開いているシリーズの**生の画素（CT なら HU）**に k×k の平均化（ボックス）
+ * フィルタをかけ、before / after を並べて表示する。結果はビューアへ重ねたり、
+ * 派生シリーズとして保存したりできる。
  *
  * ── このデモで見せたいこと ────────────────────────────────────
  *  1. ui.js はレンダラのフルコンテキストで動く（document も fetch も使える）
- *  2. 開いているシリーズを DOM から見つける（data-tile-id 属性）
- *  3. backend の REST API を叩く（import.meta.url から API のオリジンを得る）
- *  4. 自前のダイアログを DOM で組み立てる
- *  5. 画素処理そのものは素の JS（分離可能ボックスフィルタ）
+ *  2. 開いているシリーズは **host.getTargets()** で分かる（DOM を覗かない）
+ *  3. 画素は **host.getPixelData()** で取れる（W/L 適用前の定量値）
+ *  4. 結果は **host.showOverlay()** で重ねられ、**host.saveDerivedSeries()** で残せる
+ *  5. 自前のダイアログを DOM で組み立てる
+ *  6. 画素処理そのものは素の JS（分離可能ボックスフィルタ）
  *
- * ── 注意（README §11 にも書いてあります）─────────────────────
- *  現状の host API には「シリーズの生ピクセル（HU 等）を取る公式の手段」がありません。
- *  そのためこのデモは **表示中のキャンバス**（W/L 適用後の 8bit RGBA）を読みます。
- *  つまり結果は「見た目の平滑化」であって、HU 値に対する定量的なフィルタではありません。
+ * ── 必要な本体の版 ───────────────────────────────────────────
+ *  getTargets / getPixelData / showOverlay / saveDerivedSeries は **GRAPHY-Next 0.1.9 以降**。
+ *  plugin.json の engines.graphy を ">=0.1.9" にしてあるので、古い本体には導入されない。
  */
-
-/** backend のオリジン。ui.js は /api/plugins/<id>/ui.js として backend から配信されるので、
- *  自分自身の URL から確実に求められる（apiBase を推測しなくてよい）。 */
-const API_ORIGIN = new URL(import.meta.url).origin;
 
 /** 既定のカーネルサイズ（奇数）。 */
 const DEFAULT_K = 3;
@@ -37,176 +34,122 @@ export async function activate(host) {
     return;
   }
 
-  const tiles = findOpenTiles();
-  if (tiles.length === 0) {
+  // 開いているシリーズは公式 API で分かる（以前は DOM の data-tile-id を見ていた）。
+  const targets = host.getTargets();
+  if (targets.length === 0) {
     host.notify("2D ビューアにシリーズが開かれていません。先にシリーズを表示してください。");
     return;
   }
 
-  // シリーズ名は backend の REST API から取る（取れなくても続行する）。
-  await Promise.all(tiles.map((t) => decorateWithSeriesInfo(t)));
-
-  openDialog(host, tiles);
+  openDialog(host, targets);
 }
 
-// ── 1. 開いているシリーズを見つける ──────────────────────────────
+// ── 1. 平均化フィルタ ────────────────────────────────────────
 
 /**
- * 2D ビューアのタイルを列挙する。
- *
- * GRAPHY-Next は各タイルの外枠 <div> に data-tile-id="<studyUid>|<seriesUid>" を持たせている。
- * これは公式の host API ではなく DOM 依存なので、本体の版が上がると変わりうる点に注意
- * （現状これが「開いているシリーズ」を知る唯一の手段）。
- *
- * @returns {{tileId: string, studyUid: string, seriesUid: string, canvas: HTMLCanvasElement, label: string}[]}
- */
-function findOpenTiles() {
-  const out = [];
-  for (const el of document.querySelectorAll("[data-tile-id]")) {
-    const tileId = el.getAttribute("data-tile-id") || "";
-    const canvas = el.querySelector("canvas");
-    if (!tileId || !(canvas instanceof HTMLCanvasElement)) continue;
-    if (canvas.width === 0 || canvas.height === 0) continue;
-    const [studyUid, seriesUid] = tileId.split("|");
-    out.push({ tileId, studyUid, seriesUid, canvas, label: shortUid(seriesUid) });
-  }
-  return out;
-}
-
-/** UID は長いので末尾だけ見せる。 */
-function shortUid(uid) {
-  if (!uid) return "(unknown)";
-  return uid.length <= 18 ? uid : "…" + uid.slice(-16);
-}
-
-/**
- * backend からシリーズ情報を取ってラベルを分かりやすくする（失敗しても無視）。
- *
- * GET /api/studies/{studyUid}/series → [{ seriesInstanceUid, seriesDescription, modality, ... }]
- * ui.js からは同一オリジンの backend を素直に fetch できる（CSP の connect-src に含まれる）。
- */
-async function decorateWithSeriesInfo(tile) {
-  try {
-    const url = `${API_ORIGIN}/api/studies/${encodeURIComponent(tile.studyUid)}/series`;
-    const res = await fetch(url);
-    if (!res.ok) return;
-    const list = await res.json();
-    const hit = Array.isArray(list)
-      ? list.find((s) => s.seriesInstanceUid === tile.seriesUid)
-      : null;
-    if (!hit) return;
-    const parts = [hit.modality, hit.seriesDescription].filter(Boolean);
-    if (parts.length > 0) tile.label = parts.join(" / ") + "  " + tile.label;
-  } catch {
-    /* オフラインでも、権限が無くても、デモとしては続行してよい */
-  }
-}
-
-// ── 2. 画素を取り出す ────────────────────────────────────────
-
-/**
- * タイルのキャンバスを ImageData として複製する。
- *
- * Cornerstone3D のビューポート キャンバスは 2D の場合も WebGL の場合もあるため、
- * いったんオフスクリーンの 2D キャンバスへ drawImage してから getImageData する
- * （この経路なら両方に対応できる）。
- *
- * @param {HTMLCanvasElement} src
- * @returns {ImageData | null}
- */
-function snapshot(src) {
-  const off = document.createElement("canvas");
-  off.width = src.width;
-  off.height = src.height;
-  const ctx = off.getContext("2d", { willReadFrequently: true });
-  if (!ctx) return null;
-  ctx.drawImage(src, 0, 0);
-  return ctx.getImageData(0, 0, off.width, off.height);
-}
-
-/** ほぼ真っ黒なら「描画されていない」可能性が高い。ユーザーに伝えるための判定。 */
-function looksBlank(img) {
-  const d = img.data;
-  let nonBlack = 0;
-  // 全画素は見ずに間引く（十分な精度で速い）。
-  for (let i = 0; i < d.length; i += 4 * 37) {
-    if ((d[i] + d[i + 1] + d[i + 2]) / 3 > 2) nonBlack++;
-  }
-  return nonBlack === 0;
-}
-
-// ── 3. 平均化フィルタ ────────────────────────────────────────
-
-/**
- * k×k の平均化（ボックス）フィルタ。
+ * k×k の平均化（ボックス）フィルタ。**単チャンネルの実数**（HU 等）に対して動く。
  *
  * 2 次元のボックスフィルタは「横方向の移動平均 → 縦方向の移動平均」に分解できる（分離可能）。
  * 素朴な二重ループは O(w·h·k²) だが、こうすると O(w·h) で済む。
  * 端は最外画素を繰り返す（clamp）扱いにしている。
  *
- * アルファは触らない（DICOM 画像は不透明）。R/G/B を個別に処理するので、
- * グレースケール（R=G=B）でもカラーでも同じコードで動く。
- *
- * @param {ImageData} img
+ * @param {Float32Array} src
+ * @param {number} w
+ * @param {number} h
  * @param {number} k 奇数のカーネルサイズ（3, 5, 7 …）
- * @returns {ImageData}
+ * @returns {Float32Array}
  */
-function meanFilter(img, k) {
-  const { width: w, height: h } = img;
+function meanFilter(src, w, h, k) {
   const r = (k - 1) / 2;
-  const src = img.data;
-  const tmp = new Uint8ClampedArray(src.length);
-  const out = new Uint8ClampedArray(src.length);
+  const tmp = new Float32Array(src.length);
+  const out = new Float32Array(src.length);
 
   // 横方向の移動平均。
   for (let y = 0; y < h; y++) {
-    for (let c = 0; c < 3; c++) {
-      let sum = 0;
-      // 先頭画素のウィンドウを作る（左側は最左画素で埋める）。
-      for (let d = -r; d <= r; d++) sum += src[(y * w + clamp(d, 0, w - 1)) * 4 + c];
-      for (let x = 0; x < w; x++) {
-        tmp[(y * w + x) * 4 + c] = sum / k;
-        // ウィンドウを 1 画素ぶんずらす（出ていく画素を引き、入ってくる画素を足す）。
-        const outX = clamp(x - r, 0, w - 1);
-        const inX = clamp(x + r + 1, 0, w - 1);
-        sum += src[(y * w + inX) * 4 + c] - src[(y * w + outX) * 4 + c];
-      }
+    let sum = 0;
+    // 先頭画素のウィンドウを作る（左側は最左画素で埋める）。
+    for (let d = -r; d <= r; d++) sum += src[y * w + clamp(d, 0, w - 1)];
+    for (let x = 0; x < w; x++) {
+      tmp[y * w + x] = sum / k;
+      // ウィンドウを 1 画素ぶんずらす（出ていく画素を引き、入ってくる画素を足す）。
+      sum += src[y * w + clamp(x + r + 1, 0, w - 1)] - src[y * w + clamp(x - r, 0, w - 1)];
     }
   }
 
   // 縦方向の移動平均。
   for (let x = 0; x < w; x++) {
-    for (let c = 0; c < 3; c++) {
-      let sum = 0;
-      for (let d = -r; d <= r; d++) sum += tmp[(clamp(d, 0, h - 1) * w + x) * 4 + c];
-      for (let y = 0; y < h; y++) {
-        out[(y * w + x) * 4 + c] = sum / k;
-        const outY = clamp(y - r, 0, h - 1);
-        const inY = clamp(y + r + 1, 0, h - 1);
-        sum += tmp[(inY * w + x) * 4 + c] - tmp[(outY * w + x) * 4 + c];
-      }
+    let sum = 0;
+    for (let d = -r; d <= r; d++) sum += tmp[clamp(d, 0, h - 1) * w + x];
+    for (let y = 0; y < h; y++) {
+      out[y * w + x] = sum / k;
+      sum += tmp[clamp(y + r + 1, 0, h - 1) * w + x] - tmp[clamp(y - r, 0, h - 1) * w + x];
     }
   }
 
-  // アルファはそのまま複製。
-  for (let i = 3; i < src.length; i += 4) out[i] = src[i];
-
-  return new ImageData(out, w, h);
+  return out;
 }
 
 function clamp(v, lo, hi) {
   return v < lo ? lo : v > hi ? hi : v;
 }
 
-// ── 4. 自前のダイアログ ─────────────────────────────────────
+// ── 2. 表示用のレンダリング ──────────────────────────────────
+//
+// 画素は定量値（HU）なので、見せるときは自分で W/L を掛けて 8bit にする。
+// ビューアと同じ見え方にしたいので、W/L は host.getViewState() から借りる。
+
+/**
+ * 実数マップを W/L で 8bit グレースケールへ焼き、ImageData にする。
+ *
+ * @param {Float32Array} values
+ * @param {number} w
+ * @param {number} h
+ * @param {{center: number, width: number}} win
+ */
+function toImageData(values, w, h, win) {
+  const img = new ImageData(w, h);
+  const lower = win.center - win.width / 2;
+  const scale = win.width > 0 ? 255 / win.width : 0;
+  for (let i = 0; i < values.length; i++) {
+    let g = Math.round((values[i] - lower) * scale);
+    g = g < 0 ? 0 : g > 255 ? 255 : g;
+    const o = i * 4;
+    img.data[o] = g;
+    img.data[o + 1] = g;
+    img.data[o + 2] = g;
+    img.data[o + 3] = 255;
+  }
+  return img;
+}
+
+/** min / max / mean（NaN は無視）。before / after の違いを数字でも見せる。 */
+function stats(values) {
+  let min = Infinity;
+  let max = -Infinity;
+  let sum = 0;
+  let n = 0;
+  for (const v of values) {
+    if (!Number.isFinite(v)) continue;
+    if (v < min) min = v;
+    if (v > max) max = v;
+    sum += v;
+    n++;
+  }
+  return n === 0 ? null : { min, max, mean: sum / n };
+}
+
+// ── 3. 自前のダイアログ ─────────────────────────────────────
 
 /**
  * before / after を並べるモーダルを組み立てる。
  *
  * ui.js はレンダラのフルコンテキストで動くので、こうして DOM を直接組める。
  * 見た目は inline style で付けている（外部 CSS は配信されないため）。
+ *
+ * @param {import('./graphy-plugin').Viewer2DPluginHost} host
+ * @param {import('./graphy-plugin').ViewerTarget[]} targets
  */
-function openDialog(host, tiles) {
+function openDialog(host, targets) {
   const overlay = el("div", {
     position: "fixed",
     inset: "0",
@@ -235,17 +178,18 @@ function openDialog(host, tiles) {
   title.textContent = "Mean Filter — 平均化フィルタ";
   panel.appendChild(title);
 
-  // ── 操作行: 対象シリーズ / カーネルサイズ / 実行 / 閉じる
+  // ── 操作行: 対象シリーズ / カーネルサイズ / 実行 / 重ねる / 保存 / 閉じる
   const bar = el("div", { display: "flex", gap: "10px", alignItems: "center", flexWrap: "wrap", marginBottom: "12px" });
   panel.appendChild(bar);
 
   bar.appendChild(labelled("対象シリーズ"));
   const seriesSel = document.createElement("select");
   styleInput(seriesSel);
-  tiles.forEach((t, i) => {
+  targets.forEach((t, i) => {
     const o = document.createElement("option");
     o.value = String(i);
-    o.textContent = t.label;
+    // シリーズ名・モダリティ・スライス位置は getTargets() が教えてくれる（REST を叩く必要が無い）。
+    o.textContent = `${t.seriesLabel} [${t.modality}] ${t.sliceIndex + 1}/${t.sliceCount}`;
     seriesSel.appendChild(o);
   });
   bar.appendChild(seriesSel);
@@ -263,13 +207,17 @@ function openDialog(host, tiles) {
   bar.appendChild(kSel);
 
   const runBtn = button("実行", "#0b5cad");
+  const overlayBtn = button("ビューアに重ねる", "#2b6a4b");
+  const saveBtn = button("シリーズとして保存", "#6a4b2b");
   const closeBtn = button("閉じる", "#39415a");
   bar.appendChild(runBtn);
+  bar.appendChild(overlayBtn);
+  bar.appendChild(saveBtn);
   bar.appendChild(closeBtn);
 
   const note = el("div", { color: "#93a1b8", fontSize: "12px", marginBottom: "10px", lineHeight: "1.6" });
   note.textContent =
-    "表示中のキャンバス（W/L 適用後の 8bit）に対して処理します。HU 値そのものへのフィルタではありません。";
+    "生の画素（CT なら HU）に対して処理します。下のプレビューは、ビューアと同じ W/L で焼いた見た目です。";
   panel.appendChild(note);
 
   // ── 画像の並び
@@ -296,35 +244,98 @@ function openDialog(host, tiles) {
   };
   document.addEventListener("keydown", onKey);
 
-  const run = () => {
-    const tile = tiles[Number(seriesSel.value)];
-    const k = Number(kSel.value);
+  /** 直近の結果（「重ねる」「保存」で使う）。 */
+  let last = null;
 
-    const img = snapshot(tile.canvas);
-    if (!img) {
-      status.textContent = "キャンバスを読み取れませんでした。";
+  const run = async () => {
+    // ⚠ 対象は毎回読み直す。ダイアログを開いている間にユーザーがスライスを送るので、
+    //    activate 時の値を使い回すと「古いスライスに対する結果」を出してしまう。
+    const current = host.getTargets();
+    const target = current[Number(seriesSel.value)] ?? current[0];
+    if (!target) {
+      status.textContent = "対象のシリーズが見つかりません（ビューアを開き直してください）。";
       return;
     }
-    if (looksBlank(img)) {
-      const msg = "画像がまだ描画されていないようです。ビューアをクリックして再描画してから、もう一度実行してください。";
-      status.textContent = msg;
-      host.notify(msg);
+    const k = Number(kSel.value);
+
+    const px = await host.getPixelData(target.tileId);
+    if (!px) {
+      status.textContent = "画素を取得できませんでした。";
       return;
     }
 
     const t0 = performance.now();
-    const filtered = meanFilter(img, k);
+    const filtered = meanFilter(px.data, px.cols, px.rows, k);
     const ms = Math.round(performance.now() - t0);
 
-    beforeBox.draw(img);
-    afterBox.draw(filtered);
+    // プレビューはビューアと同じ W/L で焼く（取れなければ値域から作る）。
+    const view = host.getViewState(target.tileId);
+    const before = stats(px.data);
+    const win = view
+      ? { center: view.windowCenter, width: view.windowWidth }
+      : before
+        ? { center: (before.min + before.max) / 2, width: before.max - before.min }
+        : { center: 0, width: 1 };
+
+    beforeBox.draw(toImageData(px.data, px.cols, px.rows, win));
+    afterBox.draw(toImageData(filtered, px.cols, px.rows, win));
     afterBox.caption.textContent = `平均化後（${k} × ${k}）`;
-    status.textContent = `${img.width} × ${img.height} px を ${k}×${k} で平滑化しました（${ms} ms）。`;
+
+    const after = stats(filtered);
+    status.textContent =
+      `${px.cols} × ${px.rows} px を ${k}×${k} で平滑化しました（${ms} ms）。` +
+      (before && after
+        ? ` 元: min ${before.min.toFixed(0)} / max ${before.max.toFixed(0)} / mean ${before.mean.toFixed(1)} ${px.unit}` +
+          ` → 後: min ${after.min.toFixed(0)} / max ${after.max.toFixed(0)} / mean ${after.mean.toFixed(1)} ${px.unit}`
+        : "");
+
+    last = { target, px, filtered, k, win };
   };
-  runBtn.onclick = run;
+  runBtn.onclick = () => {
+    void run();
+  };
+
+  // 結果をビューアへ重ねる（値を渡すだけ。色付けは本体がする）。
+  overlayBtn.onclick = () => {
+    if (!last) {
+      status.textContent = "先に「実行」を押してください。";
+      return;
+    }
+    const ok = host.showOverlay(last.target.tileId, {
+      data: last.filtered,
+      rows: last.px.rows,
+      cols: last.px.cols,
+      window: last.win,
+      opacity: 1,
+    });
+    status.textContent = ok
+      ? "ビューアに重ねました（スライスを送ると隠れます。もう一度押すと更新されます）。"
+      : "重ねられませんでした（表示中のスライスが変わった可能性があります）。";
+  };
+
+  // 結果を派生シリーズとして保存する（本体が確認ダイアログを出す）。
+  saveBtn.onclick = async () => {
+    if (!last) {
+      status.textContent = "先に「実行」を押してください。";
+      return;
+    }
+    const res = await host.saveDerivedSeries(last.target.tileId, {
+      seriesDescription: `Mean ${last.k}x${last.k}`,
+      derivationDescription: `Mean filter ${last.k}x${last.k} (separable box)`,
+      frames: [{ sliceIndex: last.px.sliceIndex, data: last.filtered }],
+      rows: last.px.rows,
+      cols: last.px.cols,
+      unit: last.px.unit,
+    });
+    status.textContent = res.ok
+      ? `保存しました（${res.instanceCount} 枚）。データベース画面のシリーズ一覧に出ます。`
+      : res.cancelled
+        ? "保存はキャンセルされました。"
+        : `保存に失敗しました: ${res.error ?? "unknown"}`;
+  };
 
   document.body.appendChild(overlay);
-  run(); // 開いた時点で既定のカーネルで 1 回実行しておく
+  void run(); // 開いた時点で既定のカーネルで 1 回実行しておく
 }
 
 // ── DOM ヘルパ ─────────────────────────────────────────────

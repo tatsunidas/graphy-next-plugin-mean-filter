@@ -1,26 +1,29 @@
 # デモ 2: Mean Filter — 開いているシリーズに平均化フィルタをかける
 
-2D ビューアで開いているシリーズの表示画像に **k×k の平均化（ボックス）フィルタ**をかけ、
-**before / after を並べて表示**するプラグインです。ビルドツールは不要です。
+2D ビューアで開いているシリーズの**生の画素（CT なら HU）**に **k×k の平均化（ボックス）
+フィルタ**をかけ、**before / after を並べて表示**するプラグインです。結果はビューアへ重ねたり、
+**派生シリーズとして保存**したりできます。ビルドツールは不要です。
 
 学べること:
 
 1. `ui.js` はレンダラのフルコンテキストで動く（`document` も `fetch` も使える）
-2. **開いているシリーズを見つける**（タイルの `data-tile-id` 属性）
-3. **backend の REST API を叩く**（`import.meta.url` から API のオリジンを得る）
-4. **自前のダイアログ**を DOM で組み立てる
-5. 画素処理そのものは素の JS（分離可能ボックスフィルタで O(w·h)）
+2. **開いているシリーズを知る**（`host.getTargets()`）
+3. **生の画素を読む**（`host.getPixelData()`。W/L 適用前の定量値）
+4. **結果を見せる・残す**（`host.showOverlay()` / `host.saveDerivedSeries()`）
+5. **自前のダイアログ**を DOM で組み立てる
+6. 画素処理そのものは素の JS（分離可能ボックスフィルタで O(w·h)）
 
-- 対象: [GRAPHY-Next](https://github.com/tatsunidas/GRAPHY-Next) v0.1.8 以降
+- 対象: [GRAPHY-Next](https://github.com/tatsunidas/GRAPHY-Next) **v0.1.9 以降**
+  （`getTargets` / `getPixelData` / `showOverlay` / `saveDerivedSeries` が入った版）
 - 動作モード: **デスクトップ版・Web 版の両方**（UI のみのプラグインなので）
 - 姉妹デモ: [デモ集ハブ](https://github.com/tatsunidas/graphy-next-plugin-demos) ／
   [デモ 1: Hello](https://github.com/tatsunidas/graphy-next-plugin-hello) ／
   [デモ 3: Gemini 所見推敲](https://github.com/tatsunidas/graphy-next-plugin-gemini-findings)
 
-> **重要な前提**: 現状の `host` API には「シリーズの生ピクセル（HU 等）を取る公式の手段」が
-> **ありません**。そのためこのデモは **表示中のキャンバス**（W/L 適用後の 8bit RGBA）を読みます。
-> つまり結果は「**見た目の平滑化**」であって、HU 値に対する定量的なフィルタではありません。
-> 詳しくは §6 と §12。
+> **v0.1.9 で変わった点**: 以前のこのデモは、開いているシリーズを DOM（`data-tile-id`）から探し、
+> 画素を**表示中のキャンバス**（W/L 適用後の 8bit）から読んでいました。v0.1.9 で
+> `getTargets()` / `getPixelData()` / `showOverlay()` / `saveDerivedSeries()` が入ったので、
+> **DOM 依存は無くなり、フィルタは HU に対する定量処理**になりました。詳しくは §6。
 
 > このリポジトリの README は**単体で完結**するように書いてあります。
 > 他のデモの README と内容が重複していますが、そういう方針です。
@@ -34,7 +37,7 @@
 3. [`plugin.json` の全フィールド](#3-pluginjson-の全フィールド)
 4. [`ui.js` と `host` API](#4-uijs-と-host-api)
 5. [コード解説](#5-コード解説)
-6. [なぜキャンバスを読むのか](#6-なぜキャンバスを読むのか)
+6. [なぜ生の画素なのか](#6-なぜ生の画素なのか)
 7. [リリースする（GitHub Release）](#7-リリースするgithub-release)
 8. [GRAPHY-Next に入れる（デスクトップ版）](#8-graphy-next-に入れるデスクトップ版)
 9. [Web 版に載せる](#9-web-版に載せる)
@@ -186,6 +189,16 @@ export function activate(host) { /* … */ }
 | プロパティ | 説明 |
 |---|---|
 | `actions` | 表示中タイルへの操作。`fit()` / `reset()` / `rotate90()` / `flipH()` / `flipV()` / `invert()` / `undo()` / `redo()` / `setWindowLevel(center, width)` / `resetWindow()` ほか |
+| `getTargets()` | **v0.1.9 以降**。操作対象タイル（選択→無ければ全）の配列。要素は `{ tileId, studyUid, seriesUid, seriesLabel, imageId, sliceIndex, sliceCount, c, t, modality }` |
+| `getViewState(tileId?)` | **v0.1.9 以降**。`{ windowCenter, windowWidth, unit, colormap, invert, flipH, flipV, rotation, zoom, pan }`。W/L はモダリティ値空間（CT なら HU） |
+| `getPixelData(tileId?, opts?)` | **v0.1.9 以降**。`Promise<{ rows, cols, data: Float32Array, unit, spacing, sliceIndex, imageId, tileId }>`。**W/L 適用前の定量値**。`opts.sliceIndex` で別スライス |
+| `showOverlay(tileId?, overlay)` | **v0.1.9 以降**。値マップを表示中スライスに重ねる。`NaN` は透明。色付け（`window` / `colormap` / `opacity`）は本体がする |
+| `clearOverlay(tileId?)` | **v0.1.9 以降**。重ねたものを消す |
+| `saveDerivedSeries(tileId?, req)` | **v0.1.9 以降**。結果を派生シリーズとして保存。**本体が必ず確認ダイアログを出す**（拒否されると `{ ok: false, cancelled: true }`） |
+
+> `getTargets()` / `getViewState()` / `getPixelData()` は**呼ぶたびに現在値を読みます**。
+> ダイアログを開いている間にユーザーがスライスを送るので、`activate` 時の値を持ち回らないこと
+> （このデモも「実行」を押すたびに `getTargets()` を読み直しています）。
 
 **`mainscreen.menu` のとき追加**
 
@@ -209,67 +222,39 @@ TypeScript を導入しなくても VS Code で `host` に補完が効きます�
 
 ## 5. コード解説
 
-### 5-1. backend のオリジンを確実に得る
+### 5-1. 開いているシリーズを知る
 
 ```js
-const API_ORIGIN = new URL(import.meta.url).origin;
+const targets = host.getTargets();
+// [{ tileId, studyUid, seriesUid, seriesLabel, imageId, sliceIndex, sliceCount, c, t, modality }, …]
 ```
 
-`ui.js` は `/api/plugins/<id>/ui.js` として backend から配信されます。
-だから **自分自身の URL のオリジンが、そのまま backend のオリジン**です。
-デスクトップ版は `file://` から起動して backend は `http://localhost:<動的ポート>` なので、
-`window.location` を見ても分かりません。`import.meta.url` を使うのが確実です。
+対象は「選択タイル → 無ければ全タイル」（`actions` の各コマンドと同じ定義）。
+シリーズ名・モダリティ・スライス位置まで入っているので、**REST を自分で叩く必要はありません**。
 
-### 5-2. 開いているシリーズを見つける
+> **毎回読み直すこと。** `getTargets()` は呼んだ時点の現在値を返します。ダイアログを開いている間に
+> ユーザーがスライスを送るので、`activate` 時の配列を持ち回ると「古いスライスに対する結果」を
+> 出してしまいます。このデモは「実行」を押すたびに読み直しています。
+
+> v0.1.8 以前は DOM の `data-tile-id` 属性を読んでいました（非公式・本体の版で壊れうる）。
+> v0.1.9 以降は不要です。
+
+### 5-2. 生の画素を読む
 
 ```js
-for (const el of document.querySelectorAll("[data-tile-id]")) {
-  const tileId = el.getAttribute("data-tile-id");   // "<studyUid>|<seriesUid>"
-  const canvas = el.querySelector("canvas");
-  …
-}
+const px = await host.getPixelData(target.tileId);
+// { rows, cols, data: Float32Array, unit, spacing, sliceIndex, imageId, tileId }
+const v = px.data[y * px.cols + x];   // CT なら HU
 ```
 
-GRAPHY-Next は 2D ビューアの各タイルの外枠 `<div>` に
-`data-tile-id="<studyUid>|<seriesUid>"` を持たせています。
+- **W/L 適用前の定量値**です（W/L や LUT を変えても値は変わりません）。単位は `unit`（CT は `"HU"`）。
+- `spacing` は `[列方向(x), 行方向(y), スライス方向(z)]` mm。物理サイズが要る処理に使えます。
+- **1 回 1 スライス**。別スライスは `getPixelData(tileId, { sliceIndex })`。範囲外は `null`
+  （末尾へ丸められたりしません）。
+- 画素を読むプラグインは `plugin.json` の `permissions` に `"read-pixels"` を宣言します
+  （導入時の同意画面に出ます。現状これは宣言であって強制ではありません）。
 
-> ⚠ **これは公式の `host` API ではなく DOM 依存**です。本体の版が上がると変わりうる点に注意
-> してください（現状これが「いま何が開かれているか」を知る唯一の手段です）。
-> 将来 `host` にシリーズ情報が入れば、そちらへ移行するのが正しい姿です。
-
-### 5-3. backend の REST API を叩く
-
-```js
-const res = await fetch(`${API_ORIGIN}/api/studies/${encodeURIComponent(studyUid)}/series`);
-const list = await res.json();   // [{ seriesInstanceUid, seriesDescription, modality, … }]
-```
-
-シリーズ名やモダリティを表示するために使っています。**失敗しても続行**する作りにしてあります
-（Web 公開デモでは一部 API が `403` になることがあるため）。
-
-**外部サイトへは接続できません。** 配布版のレンダラには
-`connect-src 'self' http://localhost:* http://127.0.0.1:*` の CSP が効いており、
-`ui.js` から外部 API を `fetch` すると**ブロックされます**。外部 API を叩きたい場合は
-バックエンド面（JAR）から呼びます（[デモ 3](https://github.com/tatsunidas/graphy-next-plugin-gemini-findings) 参照）。
-
-### 5-4. キャンバスから画素を取る
-
-```js
-const off = document.createElement("canvas");
-off.width = src.width; off.height = src.height;
-const ctx = off.getContext("2d", { willReadFrequently: true });
-ctx.drawImage(src, 0, 0);
-return ctx.getImageData(0, 0, off.width, off.height);
-```
-
-Cornerstone3D のビューポート キャンバスは 2D の場合も WebGL の場合もあります。
-**いったんオフスクリーンの 2D キャンバスへ `drawImage` してから `getImageData`** すれば、
-どちらでも同じコードで読めます。
-
-読んだ結果がほぼ真っ黒なら「まだ描画されていない」可能性が高いので、
-その場合は再描画を促すメッセージを出しています。
-
-### 5-5. 平均化フィルタ（分離可能ボックスフィルタ）
+### 5-3. 平均化フィルタ（分離可能ボックスフィルタ）
 
 2 次元のボックスフィルタは「**横方向の移動平均 → 縦方向の移動平均**」に分解できます。
 素朴な二重ループは O(w·h·k²) ですが、こうすると **O(w·h)**（カーネルサイズに依存しない）で済みます。
@@ -277,51 +262,111 @@ Cornerstone3D のビューポート キャンバスは 2D の場合も WebGL の
 ```js
 // 横方向: ウィンドウを 1 画素ずらすたびに、出ていく画素を引き、入ってくる画素を足す
 let sum = 0;
-for (let d = -r; d <= r; d++) sum += src[(y * w + clamp(d, 0, w - 1)) * 4 + c];
+for (let d = -r; d <= r; d++) sum += src[y * w + clamp(d, 0, w - 1)];
 for (let x = 0; x < w; x++) {
-  tmp[(y * w + x) * 4 + c] = sum / k;
-  sum += src[(y * w + clamp(x + r + 1, 0, w - 1)) * 4 + c]
-       - src[(y * w + clamp(x - r,     0, w - 1)) * 4 + c];
+  tmp[y * w + x] = sum / k;
+  sum += src[y * w + clamp(x + r + 1, 0, w - 1)]
+       - src[y * w + clamp(x - r,     0, w - 1)];
 }
 ```
 
+- 入力は**単チャンネルの実数**（`Float32Array`）なので、RGBA の 4 要素飛ばしが要りません。
 - 端は最外画素を繰り返す（clamp）扱い。
-- R / G / B を個別に処理するので、グレースケール（R=G=B）でもカラーでも同じコードで動きます。
-- アルファはそのまま複製（DICOM 画像は不透明）。
 
-### 5-6. 自前のダイアログ
+### 5-4. プレビューを焼く
+
+画素は定量値なので、見せるときは自分で W/L を掛けて 8bit にします。ビューアと同じ見え方に
+したいので、W/L は `host.getViewState()` から借ります。
+
+```js
+const view = host.getViewState(target.tileId);
+const lower = view.windowCenter - view.windowWidth / 2;
+const g = clamp(Math.round((value - lower) * (255 / view.windowWidth)), 0, 255);
+```
+
+### 5-5. 結果をビューアへ重ねる
+
+```js
+host.showOverlay(target.tileId, {
+  data: filtered, rows: px.rows, cols: px.cols,
+  window: { center: view.windowCenter, width: view.windowWidth }, opacity: 1,
+});
+```
+
+**渡すのは値だけ**で、色付け（`window` / `colormap` / `opacity`）は本体がします。
+`NaN` の画素は**透明**になるので、マスクや部分的なマップをそのまま渡せます。
+`rows`/`cols` は現在スライスと一致していること（不一致なら `false` が返ります）。
+オーバーレイは**出したスライスに紐付き**、他スライスでは自動的に隠れます。
+
+### 5-6. 結果を派生シリーズとして保存する
+
+```js
+const res = await host.saveDerivedSeries(target.tileId, {
+  seriesDescription: `Mean ${k}x${k}`,
+  derivationDescription: `Mean filter ${k}x${k} (separable box)`,
+  frames: [{ sliceIndex: px.sliceIndex, data: filtered }],
+  rows: px.rows, cols: px.cols, unit: px.unit,
+});
+```
+
+- **本体が必ず確認ダイアログを出します**（抑止不可）。拒否されると `{ ok: false, cancelled: true }`。
+  プラグインが黙って保管庫に書くことはできません。
+- **幾何はプラグインが書きません。** `frames` は「元シリーズのどのスライスに対応するか」
+  （`sliceIndex`）だけを申告し、位置・向き・画素間隔・スライス厚は本体が元シリーズから引き継ぎます。
+- 画素は 16bit ＋ Rescale で保存されます。**HU のような整数はそのまま**、確率マップのような
+  小さい実数は値域から係数を決めて量子化されます。`NaN` は「データ無し」として値域の最小値に。
+- 保存物には `SeriesDescription` の **`[Plugin] ` 接頭辞**とプラグイン id・版が必ず残ります。
+  **元シリーズは変更されません**（新しいシリーズが 1 本増えるだけ）。
+
+### 5-7. 自前のダイアログ
 
 `ui.js` はレンダラのフルコンテキストで動くので、`document.createElement` で普通に DOM を組めます。
 外部 CSS ファイルは配信されないため、見た目は **inline style** で付けています
 （CSP は `style-src 'self' 'unsafe-inline'` なので `element.style.x = …` は問題ありません）。
 
-Esc キー・オーバーレイのクリック・「閉じる」ボタンのいずれでも閉じられるようにしてあります。
-**イベントリスナは閉じるときに必ず外してください**（プラグインは何度も起動されます）。
+### 5-8. （参考）backend の REST を叩きたいとき
+
+このデモでは不要になりましたが、backend の API を叩きたい場合はオリジンを
+`import.meta.url` から得るのが確実です。`ui.js` は `/api/plugins/<id>/ui.js` として backend から
+配信されるので、**自分自身の URL のオリジンがそのまま backend のオリジン**です
+（デスクトップ版は `file://` から起動し backend は動的ポートなので、`window.location` では分かりません）。
+
+```js
+const API_ORIGIN = new URL(import.meta.url).origin;
+```
+
+**外部サイトへは接続できません。** 配布版のレンダラには
+`connect-src 'self' http://localhost:* http://127.0.0.1:*` の CSP が効いており、
+`ui.js` から外部 API を `fetch` すると**ブロックされます**。外部 API を叩きたい場合は
+バックエンド面（JAR）から呼びます（[デモ 3](https://github.com/tatsunidas/graphy-next-plugin-gemini-findings) 参照）。
 
 ---
 
-## 6. なぜキャンバスを読むのか
+## 6. なぜ生の画素なのか
 
-やりたいことは「シリーズの生ピクセルに平均化フィルタをかける」ですが、**現状それはできません**。
+平均化フィルタは「値」に対する処理です。表示中のキャンバス（W/L 適用後の 8bit）を平滑化すると、
+**見た目の平滑化**にはなりますが、W/L の外に飛び出した値（骨も空気も飽和して同じ白／黒）は
+すでに情報が落ちているので、**HU に対する定量処理にはなりません**。
 
-| 欲しいもの | いまの `host` API | 代替 |
+`host.getPixelData()` が返すのは `pixelCalibration` を通した**モダリティ値**です。
+
+| | 旧（〜v0.1.8） | 新（v0.1.9 以降） |
 |---|---|---|
-| 表示中のシリーズ UID | ❌ 無い | DOM の `data-tile-id`（§5-2） |
-| スライスの生ピクセル（HU） | ❌ 無い | 表示中キャンバス（8bit・W/L 適用後） |
-| シリーズ全スライスの一括処理 | ❌ 無い | — |
-| 処理結果をビューアに戻す | ❌ 無い | 自前ダイアログに表示（§5-6） |
+| 対象タイルの特定 | DOM の `data-tile-id`（非公式・壊れやすい） | `getTargets()` |
+| 画素 | 表示中キャンバスの 8bit RGBA（W/L 適用後） | `getPixelData()` の `Float32Array`（CT なら HU） |
+| シリーズ名・モダリティ | REST を自分で叩く | `getTargets()` が返す |
+| 結果の表示 | 自前ダイアログのみ | 自前ダイアログ ＋ `showOverlay()` でビューアに重ねる |
+| 結果の保存 | ❌ | `saveDerivedSeries()`（本体が確認ダイアログを出す） |
 
-そこでこのデモは、**取れるもので成立する範囲**に絞っています。
+**W/L や LUT を変えても `getPixelData()` の値は変わりません**（表示の設定に依存しない）。
+このデモが before / after で出している min / max / mean は、その定量値の統計です。
 
-- 対象は **表示中の 1 スライス**（選択したタイルに映っているもの）
-- 値は **W/L 適用後の 8bit**。したがって結果は見た目の平滑化であり、
-  **HU 値に対する定量的なフィルタではありません**
-- 結果は**別ダイアログに表示**するだけで、ビューアの画像は変更しません
+### まだできないこと
 
-生ピクセル・全スライスを扱いたい場合の現実的な道筋は、**バックエンド面（Java JAR）**で
-DICOM を読んで処理し、結果を新しいシリーズとして保存する形です。ただし現状の SPI
-（`Object run(Map args)`）には保管庫へのアクセスが渡されないため、**そこも今は開いていません**。
-正直に書いておきます。
+- **全スライスの一括処理**は「1 回 1 スライス」の API を回す形になります
+  （`getPixelData(tileId, { sliceIndex })` を繰り返す）。このデモは表示中の 1 スライスだけを扱います。
+  512×512×500 を Float32 で一度に持つと 500MB を超えるので、必要な範囲だけ読む設計にしてください。
+- **カラー画像**（RGB）は輝度に落ちて `unit === "raw"` になります。
 
 ---
 
@@ -578,12 +623,12 @@ minisign -V -p minisign.pub -m mean-filter-0.1.0.zip -x mean-filter-0.1.0.zip.mi
 
 ## 12. できないこと（正直に）
 
-- **シリーズの生ピクセル（HU 等）に触れる公式 API はまだありません。**
-  このデモは表示中のキャンバス（8bit・W/L 適用後）を読んでいます。
-  **定量解析には使えません**。
-- **全スライスの一括処理はできません。** 表示中の 1 スライスのみです。
-- **処理結果をビューアへ書き戻せません。** 別ダイアログに表示するだけです。
-- **`data-tile-id` は公式 API ではありません。** 本体の版が上がると変わりうる DOM 依存です。
+- **このデモが扱うのは表示中の 1 スライスだけです。** API は `sliceIndex` 指定で他スライスも
+  読めますが（1 回 1 スライス）、シリーズ全体を回す実装はしていません。
+- **保存した派生シリーズは診断用に検証されたものではありません。** 保存物には
+  `SeriesDescription` の `[Plugin] ` 接頭辞とプラグイン id・版が必ず残ります（消せません）。
+- **カラー画像は輝度に落ちます**（`unit === "raw"`）。
+- **v0.1.8 以前の本体には導入できません**（`engines.graphy` が `">=0.1.9"`）。これは意図した挙動です。
 - **未署名プラグインの真正性は保証できません。** 同意画面は判断材料を出すだけです。
 - **宣言 `permissions` は強制されません。**
 - **実行時の隔離がありません。** プラグインはアプリと同じ権限で動きます。
